@@ -1,13 +1,12 @@
-# Sample Hardhat Project
+# Chainlink Dynamic NFT contracts
 
-This project demonstrates a basic Hardhat use case. It comes with a sample contract, a test for that contract, and a Hardhat Ignition module that deploys that contract.
+This project mints Dynamic NFTs that change based on the market price of an asset pair (for example, the BTC/USD asset price). When prices go up, its a bull trend and when the go down its a bear trend. We run [Chainlink Automation](https://docs.chain.link/chainlink-automation) to have our smart contract automatically called at specified intervals so that on-chain logic checks the [Chainlink Price Feed](https://docs.chain.link/data-feeds/price-feeds) to see if there has been a change in price. Accordingly the minted NFTs dynamically alternate between the images below.
 
-Try running some of the following tasks:
-
-```shell
-npx hardhat help
-npx hardhat test
-REPORT_GAS=true npx hardhat test
-npx hardhat node
-npx hardhat ignition deploy ./ignition/modules/Lock.ts
-```
+<p float="left">
+    <img src="./ipfs/gamer_bull.png" width = "200" />
+    <img src="./ipfs/party_bull.png" width = "200" />
+    <img src="./ipfs/simple_bull.png" width = "200" />
+    <img src="./ipfs/beanie_bear.png" width = "200" />
+    <img src="./ipfs/coolio_bear.png" width = "200" />
+    <img src="./ipfs/simple_bear.png" width = "200" />
+</p>
