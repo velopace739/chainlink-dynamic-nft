@@ -8,23 +8,35 @@ import {ERC721URIStorage} from "@openzeppelin/contracts/token/ERC721/extensions/
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 // Chainlink imports
-import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
-import {AutomationCompatibleInterface} from "@chainlink/contracts/src/v0.8/automation/AutomationCompatible.sol";
+import "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
+import "@chainlink/contracts/src/v0.8/automation/AutomationCompatible.sol";
+import "@chainlink/contracts/src/v0.8/vrf/interfaces/VRFCoordinatorV2Interface.sol";
+import "@chainlink/contracts/src/v0.8/vrf/VRFConsumerBaseV2.sol";
 
 // Dev imports
 import "hardhat/console.sol";
 
-contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, Ownable, AutomationCompatibleInterface {
+contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, Ownable, AutomationCompatibleInterface, VRFConsumerBaseV2 {
     uint256 private _nextTokenId;
     AggregatorV3Interface public pricefeed;
 
+    // VRF
+    VRFCoordinatorV2Interface public COORDINATOR;
+    uint256[] public s_randomWords;
+    uint256 public s_requestId;
+    uint32 public callbackGasLimit = 500000; // set higher as fulfillRandomWords is doing a LOT of heavy lifting.
+    uint64 public s_subscriptionId;
+    bytes32 keyhash =  0x8af398995b04c28e9951adb9721ef74c74f93e6a478f39e7e0777be13527e7ef; // keyhash, see https://docs.chain.link/vrf/v2/subscription/supported-networks
+    
     /**
      * Use an interval in seconds and a timestamp to slow execution of Upkeep
      */
     uint public /* immutable */ interval; 
     uint public lastTimeStamp;
-
     int256 public currentPrice;
+
+    enum MarketTrend{BULL, BEAR} // Create enum
+    MarketTrend public currentMarketTrend = MarketTrend.BULL;
 
     // IPFS URIs for the dynamic nft graphics/metadata.
     string[] bullUrisIpfs = [
@@ -43,8 +55,9 @@ contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, Ownable, Automa
     constructor(
         uint updateInterval,
         address _pricefeed,
-        address initialOwner
-    ) ERC721("Bull&Bear", "BBTK") Ownable(initialOwner) {
+        address initialOwner,
+        address _vrfCoordinator
+    ) ERC721("Bull&Bear", "BBTK") Ownable(initialOwner) VRFConsumerBaseV2(_vrfCoordinator) {
         interval = updateInterval;
         lastTimeStamp = block.timestamp;
 
@@ -55,6 +68,8 @@ contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, Ownable, Automa
 
         // set the price for the chosen currency pair
         currentPrice = getLatestPrice();
+
+        COORDINATOR = VRFCoordinatorV2Interface(_vrfCoordinator); 
     }
 
     function safeMint(address to) public onlyOwner {
@@ -92,15 +107,16 @@ contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, Ownable, Automa
 
             if (latestPrice < currentPrice) {
                 // bear
-                console.log("ITS BEAR TIME");
-                updateAllTokenUris("bear");
-
+                currentMarketTrend = MarketTrend.BEAR;
             } else {
                 // bull
-                console.log("ITS BULL TIME");
-                updateAllTokenUris("bull");
+                currentMarketTrend = MarketTrend.BULL;
             }
 
+            // Initiate the VRF calls to get a random number (word)
+            // that will then be used to to choose one of the URIs 
+            // that gets applied to all minted tokens.
+            requestRandomnessForNFTUris();
             // update currentPrice
             currentPrice = latestPrice;
         } else {
@@ -124,12 +140,63 @@ contract BullBear is ERC721, ERC721Enumerable, ERC721URIStorage, Ownable, Automa
         return answer; //  example price returned 3034715771688
     }
 
+    function requestRandomnessForNFTUris() internal {
+        require(s_subscriptionId != 0, "Subscription ID not set"); 
+
+        // Will revert if subscription is not set and funded.
+        s_requestId = COORDINATOR.requestRandomWords(
+            keyhash,
+            s_subscriptionId, // See https://vrf.chain.link/
+            3, //minimum confirmations before response
+            callbackGasLimit,
+            1 // `numWords` : number of random values we want. Max number for rinkeby is 500 (https://docs.chain.link/vrf/v2/subscription/supported-networks)
+        );
+
+        console.log("Request ID: ", s_requestId);
+
+        // requestId looks like uint256: 80023009725525451140349768621743705773526822376835636211719588211198618496446
+    }
+
+    // This is the callback that the VRF coordinator sends the 
+    // random values to.
+    function fulfillRandomWords(uint256 requestId, uint256[] memory randomWords) internal override {
+        s_randomWords = randomWords;
+        // randomWords looks like this uint256: 68187645017388103597074813724954069904348581739269924188458647203960383435815
+
+        console.log("...Fulfilling random Words");
+        
+        string[] memory urisForTrend = currentMarketTrend == MarketTrend.BULL ? bullUrisIpfs : bearUrisIpfs;
+        uint256 idx = randomWords[0] % urisForTrend.length; // use modulo to choose a random index.
+
+
+        for (uint i = 0; i < _nextTokenId ; i++) {
+            _setTokenURI(i, urisForTrend[idx]);
+        } 
+
+        string memory trend = currentMarketTrend == MarketTrend.BULL ? "bullish" : "bearish";
+        
+        emit TokensUpdated(trend);
+    }
+
     function setPriceFeed(address newFeed) public onlyOwner {
         pricefeed = AggregatorV3Interface(newFeed);
     }
 
     function setInterval(uint256 newInterval) public onlyOwner {
         interval = newInterval;
+    }
+
+    // For VRF Subscription Manager
+    function setSubscriptionId(uint64 _id) public onlyOwner {
+        s_subscriptionId = _id;
+    }
+
+    function setCallbackGasLimit(uint32 maxGas) public onlyOwner {
+        callbackGasLimit = maxGas;
+    }
+
+    function setVrfCoodinator(address _address) public onlyOwner {
+        COORDINATOR = VRFCoordinatorV2Interface(_address);
     }
 
     function updateAllTokenUris(string memory trend) internal {

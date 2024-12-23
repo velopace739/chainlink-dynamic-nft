@@ -5,26 +5,61 @@ import { moveTime, moveBlocks } from './utils/testutils';
 
 const TOKEN_ID_0 = 0;
 const TOKEN_ID_1 = 1;
+
 const UPDATE_INTERVAL_SEC = 60;
 const DECIMALS = 8;
 const INITIAL_PRICE = 3000000000000;
+
+const VRF_FUND_AMOUNT = "1000000000000000000000";
+
+const BASE_FEE = "250000000000000000";
+const GAS_PRICE_LINK = 1e9; // 0.000000001 LINK per gas
+
 const checkData = ethers.keccak256(ethers.toUtf8Bytes(""));
 
 describe("Test Bull&Bear", () => {
   async function bullAndBearFixture() {
     const [deployer, owner1] = await ethers.getSigners();
 
+    // Setup Price Feeds
     const PriceFeedMock = await ethers.getContractFactory("MockV3Aggregator");
     const priceFeedMock = await PriceFeedMock.deploy(DECIMALS, INITIAL_PRICE);
 
+    // Setup VRF and Subscription
+    const VrfCoordinatorMock = await ethers.getContractFactory("VRFCoordinatorV2Mock");
+    const vrfCoordinatorMock = await VrfCoordinatorMock.deploy(
+      BASE_FEE,
+      GAS_PRICE_LINK
+    );
+    const transactionResponse = await vrfCoordinatorMock.createSubscription();
+    const transactionReceipt = await transactionResponse.wait();
+    const subscriptionEvent = transactionReceipt?.logs
+      .map((log) => {
+        try {
+          return VrfCoordinatorMock.interface.parseLog(log);
+        } catch (e) {
+          return null; // Ignore logs that aren't from this contract
+        }
+      })
+      .find((parsedLog) => parsedLog && parsedLog.name === "SubscriptionCreated");
+    const subscriptionId = subscriptionEvent?.args.subId;
+    // Fund the subscription
+    // Our mock makes it so we don't actually have to worry about sending fund
+    await vrfCoordinatorMock.fundSubscription(subscriptionId, VRF_FUND_AMOUNT);
+
+    // Setup dNFT
     const Token = await ethers.getContractFactory("BullBear");
     const tokenContract = await Token.deploy(
       UPDATE_INTERVAL_SEC,
       await priceFeedMock.getAddress(),
-      deployer
+      deployer,
+      await vrfCoordinatorMock.getAddress()
     );
 
-    return { tokenContract, deployer, owner1, priceFeedMock };
+    await tokenContract.setSubscriptionId(subscriptionId);
+    await vrfCoordinatorMock.addConsumer(subscriptionId, await tokenContract.getAddress())
+
+    return { tokenContract, deployer, owner1, priceFeedMock, vrfCoordinatorMock };
   }
 
   it("Should deploy Bull&Bear token contract correctly", async () => {
@@ -143,8 +178,11 @@ describe("Test Bull&Bear", () => {
     expect(updatedUpkeepTs).to.be.greaterThan(lastUpkeepTs);
   });
 
+  // ======================================================================================
+  //  *** The following two it() blocks have the changes for the VRF randomness testing ***
+  // ======================================================================================
   it("Upkeep correctly updates Token URIs on consecutive price decreases", async () => {
-    const { tokenContract, priceFeedMock, owner1 } = await loadFixture(bullAndBearFixture);
+    const { tokenContract, priceFeedMock, owner1, vrfCoordinatorMock } = await loadFixture(bullAndBearFixture);
     await tokenContract.safeMint(owner1.address);
 
     let newPrice = INITIAL_PRICE - 10000;
@@ -154,26 +192,20 @@ describe("Test Bull&Bear", () => {
     moveTime(UPDATE_INTERVAL_SEC + 1);
     moveBlocks(1);
 
-    await tokenContract.performUpkeep(checkData);
+    const REQUEST_ID = 1;
+    await tokenContract.performUpkeep("0x");
+    await vrfCoordinatorMock.fulfillRandomWords(
+      REQUEST_ID,
+      await tokenContract.getAddress()
+    );
 
     const newTokenUri = await tokenContract.tokenURI(TOKEN_ID_0);
 
-    expect(newTokenUri).to.include("filename=beanie_bear.json");
-
-    // Decrease price again to check that Token URI does not update.
-    newPrice = newPrice - 30000;
-    await priceFeedMock.updateAnswer(newPrice);
-
-    moveTime(UPDATE_INTERVAL_SEC + 1);
-    moveBlocks(1);
-
-    await tokenContract.performUpkeep(checkData);
-
-    expect(newTokenUri).to.include("filename=beanie_bear.json");
+    expect(newTokenUri).to.include("_bear.json");
   });
 
   it("Upkeep correctly updates Token URIs on consecutive price increases", async () => {
-    const { tokenContract, priceFeedMock, owner1 } = await loadFixture(bullAndBearFixture);
+    const { tokenContract, priceFeedMock, owner1, vrfCoordinatorMock } = await loadFixture(bullAndBearFixture);
     await tokenContract.safeMint(owner1.address);
 
     let newPrice = INITIAL_PRICE + 10000;
@@ -185,19 +217,14 @@ describe("Test Bull&Bear", () => {
 
     await tokenContract.performUpkeep(checkData);
 
+    const REQUEST_ID = 1;
+    await vrfCoordinatorMock.fulfillRandomWords(
+      REQUEST_ID,
+      await tokenContract.getAddress()
+    );
+
     const newTokenUri = await tokenContract.tokenURI(TOKEN_ID_0);
 
-    expect(newTokenUri).to.include("filename=gamer_bull.json");
-
-    // Decrease price again to check that Token URI does not update.
-    newPrice = newPrice + 30000;
-    await priceFeedMock.updateAnswer(newPrice);
-
-    moveTime(UPDATE_INTERVAL_SEC + 1);
-    moveBlocks(1);
-
-    await tokenContract.performUpkeep(checkData);
-
-    expect(newTokenUri).to.include("filename=gamer_bull.json");
+    expect(newTokenUri).to.include("bull.json");
   });
 });
